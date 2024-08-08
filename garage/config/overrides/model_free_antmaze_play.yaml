@@ -1,11 +1,15 @@
 # @package _group_
 env: "antmaze-large-play-v2"
+wandb_project: "garage-antmaze-diverse"
 
 p_tremble: 0.0
 reset_prob: 1.0
-total_env_steps: 500_000
+reset_type: "bc_rollin" # options: "expert_reset", "subopt_reset", "bc_rollin"
+total_env_steps: 2_000_000 
 eval_frequency: 25_000
-expert_dataset_size: 100_000
+expert_dataset_size: 1_000
+subopt_dataset_size: 100_000
+subopt_tremble: 0.25
 bc_init_steps: 10000
 
 train_discriminator: true

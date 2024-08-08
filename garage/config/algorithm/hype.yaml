@@ -3,6 +3,7 @@ name: "hype"
 
 reset_prob: 0.0
 total_env_steps: ${overrides.total_env_steps}
+subopt_dataset_size: 0
 
 relabel: true
 hybrid_sampling: true

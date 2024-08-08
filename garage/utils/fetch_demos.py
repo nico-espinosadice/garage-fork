@@ -9,7 +9,7 @@ EPS = 1e-6
 
 
 def fetch_demos(
-    env_name: str, expert_dataset_size: int = -1, silent: bool = False
+    env_name: str, expert_dataset_size: int = -1, silent: bool = False, tremble: float = 0.0
 ) -> tuple:
     """
     Fetches the expert demonstrations for the given environment.
@@ -35,13 +35,18 @@ def fetch_demos(
     else:
         is_truncated = False
 
+    if "maze" in env_name and expert_dataset_size != 100_000:
+        fname = f"{env_name}_{int(expert_dataset_size / 1000)}_demos.npz" 
+    else:
+        fname = f"{env_name}_{tremble}_demos.npz"
     possible_data_path = Path(
-        PROJECT_ROOT, "experts", env_name, f"{env_name}_demos.npz"
+        PROJECT_ROOT, "experts", env_name, fname
     )
     assert possible_data_path.exists(), f"{possible_data_path} does not exist, please run `python experts/download_datasets.py --env <env_name>` to download demos, or `python experts/collect_demos.py --env <env_name>` to collect demos."
 
     if "maze" in env_name:
         data = np.load(possible_data_path, allow_pickle=True)
+
         new_dataset = {
             "observations": data["observations"],
             "actions": data["actions"],
@@ -56,6 +61,7 @@ def fetch_demos(
         qvel = data["qvel"]
         goals = data["goals"]
         Js = np.zeros_like(qpos)  # no expert rewards
+        mean, std = 0, 0
         traj_obs = traj_actions = traj_seeds = None  # no seeds for maze envs
     else:
         dataset = np.load(possible_data_path, allow_pickle=True)
@@ -98,6 +104,9 @@ def fetch_demos(
             start = term[i][0] + 1
         Js = np.array(Js)
         exp_ranges = np.array(ranges)
+        if len(exp_ranges) == 0: # for dataset sizes less than 1 full trajectory
+            exp_ranges = [[0, len(new_dataset["observations"]) - 1]]
+            Js = [new_dataset["rewards"][exp_ranges[0][0] : exp_ranges[0][1]].sum()]
 
         # Record sequence of obs and actions for each seed to achieve deterministic resets
         traj_obs = np.array(
@@ -167,6 +176,7 @@ def fetch_demos(
             print(f"{qpos.shape=}\t{qvel.shape=}\t{np.mean(Js)=}\t{np.std(Js)=}")
             print(f"{traj_obs.shape=}\t{traj_actions.shape=}\t{traj_seeds.shape=}")
             print("-" * 80)
+        mean, std = np.mean(Js), np.std(Js)
 
     return {
         "dataset": new_dataset,
@@ -179,4 +189,6 @@ def fetch_demos(
         "traj_actions": traj_actions,
         "traj_seeds": traj_seeds,
         "expert_reset_states": expert_reset_states,
+        "dataset_mean": mean,
+        "dataset_std": std,
     }

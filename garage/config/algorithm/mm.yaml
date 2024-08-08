@@ -2,7 +2,9 @@
 name: "mm"
 
 reset_prob: 0.0
+reset_type: "expert_reset"
 total_env_steps: ${overrides.total_env_steps}
+subopt_dataset_size: 0
 
 relabel: true
 hybrid_sampling: false

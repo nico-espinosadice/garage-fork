@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 from typing import Any, Dict
+import random
 
 import d4rl
 import gym
@@ -10,6 +11,7 @@ import tqdm
 from stable_baselines3 import SAC
 
 from garage.utils.common import PROJECT_ROOT, ENV_ABBRV_TO_FULL
+from garage.utils.gym_wrappers import TremblingHandWrapper
 
 
 def get_trajectory_data_dict() -> Dict[str, Any]:
@@ -29,12 +31,13 @@ def get_trajectory_data_dict() -> Dict[str, Any]:
 
 
 def rollout(
-    env_name: str, expert_root_dir: str, max_path: int = 1000, num_data: int = 100_000
+    env_name: str, expert_root_dir: str, max_path: int = 1000, num_data: int = 100_000, tremble: float = 0.0
 ) -> Dict[str, Any]:
     expert_ckpt_path = f"{expert_root_dir}/best_model"
     model = SAC.load(expert_ckpt_path)
 
     env = gym.make(env_name)
+    env = TremblingHandWrapper(env, tremble)
     data = get_trajectory_data_dict()
     traj_data = get_trajectory_data_dict()
 
@@ -43,7 +46,8 @@ def rollout(
     t = 0
     done = False
     seed = 0
-    s = env.reset(seed=seed)
+    env.seed(seed)
+    s = env.reset()
     while len(data["rewards"]) < num_data:
         a = model.predict(s, deterministic=True)
         if isinstance(a, tuple):
@@ -84,7 +88,9 @@ def rollout(
             t = 0
             _returns = 0
             seed += 1
-            s = env.reset(seed=seed)
+            env.seed(seed)
+            s = env.reset()
+            # s = env.reset(seed=seed)
             traj_data = get_trajectory_data_dict()
 
     new_data = dict(
@@ -104,10 +110,11 @@ def rollout(
         new_data[k] = new_data[k][:num_data]
     return new_data
 
-
-def parse_antmaze_demos(env_name):
+def parse_antmaze_demos(env_name, drop_prop=0.0, num_trajs=0):
     env = gym.make(env_name)
     dataset = env.get_dataset()
+    q_dataset = d4rl.qlearning_dataset(env)
+    dataset, q_dataset = filter_successful_trajs(dataset, q_dataset, drop_prop, num_trajs)
 
     term = np.argwhere(np.logical_or(dataset["timeouts"] > 0, dataset["terminals"] > 0))
     start = 0
@@ -115,7 +122,6 @@ def parse_antmaze_demos(env_name):
     for i in range(len(term)):
         expert_ranges.append([start, term[i][0] + 1])
         start = term[i][0] + 1
-    q_dataset = d4rl.qlearning_dataset(env)
 
     curr_obs_pt = 0
     curr_obs_indices = []
@@ -228,6 +234,68 @@ def parse_antmaze_demos(env_name):
     }
 
 
+def filter_successful_trajs(dataset, q_dataset, drop_prop, num_trajs=0):
+    succesful_traj_ranges = get_successful_trajs(dataset)
+    if drop_prop > 0.0:
+        num_dropped_trajs = int(drop_prop * succesful_traj_ranges.shape[0])
+    elif num_trajs > 0:
+        num_dropped_trajs = succesful_traj_ranges.shape[0] - num_trajs
+    else:
+        num_dropped_trajs = 0 
+    
+    if num_dropped_trajs > 0:
+        drop_idxs = random.sample(range(succesful_traj_ranges.shape[0]), num_dropped_trajs) 
+        drop_traj_ranges = succesful_traj_ranges[drop_idxs]
+        dataset = remove_trajs(dataset, drop_traj_ranges)
+        
+        in_dataset = np.isin(q_dataset["observations"], dataset["observations"])
+        indices = np.where(np.all(in_dataset, axis=1))[0]
+        for key in q_dataset.keys():
+            q_dataset[key] = q_dataset[key][indices]
+            
+        in_dataset = np.isin(q_dataset["next_observations"], dataset["observations"])
+        indices = np.where(np.all(in_dataset, axis=1))[0]
+        for key in q_dataset.keys():
+            q_dataset[key] = q_dataset[key][indices]
+    
+    return dataset, q_dataset
+
+def get_successful_trajs(dataset):
+    timeout_idxs = np.where(dataset["timeouts"] == True)[0]
+
+    success_idxs = np.where(dataset["rewards"] == 1.0)[0]
+
+    success_ranges = []
+
+    for idx in success_idxs:
+        smaller_timeouts = timeout_idxs[timeout_idxs < idx]
+        if len(smaller_timeouts) > 0:
+            success_ranges.append([smaller_timeouts[-1], idx])
+
+    np_success_ranges = np.array(success_ranges)
+
+    unique_first_elements = np.unique(np_success_ranges[:, 0])
+
+    filtered_pairs = []
+
+    for first in unique_first_elements:
+        subset = np_success_ranges[np_success_ranges[:, 0] == first]
+        max_pair = subset[np.argmax(subset[:, 1])]
+        filtered_pairs.append(max_pair)
+
+    return np.array(filtered_pairs)
+
+
+def remove_trajs(dataset, traj_ranges):
+    indices_to_remove = set()
+    for pair in traj_ranges:
+        indices_to_remove.update(range(pair[0], pair[1] + 1))
+    for key in dataset.keys():
+        dataset[key] = np.delete(dataset[key], list(indices_to_remove), axis=0)
+    
+    return dataset
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Collect expert demonstrations.")
     parser.add_argument(
@@ -235,15 +303,37 @@ if __name__ == "__main__":
         choices=ENV_ABBRV_TO_FULL.keys(),
         required=True,
     )
+    parser.add_argument(
+        "--tremble",
+        type=float,
+        required=False,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--maze-drop-prop",
+        type=float,
+        required=False,
+        default=0.0
+    )
+    parser.add_argument(
+        "--maze-keep-k-trajs",
+        type=int,
+        required=False,
+        default=0
+    )
     args = parser.parse_args()
 
     env_name_full = ENV_ABBRV_TO_FULL[args.env]
     expert_root_dir = Path(PROJECT_ROOT, "experts", env_name_full)
     expert_root_dir.mkdir(parents=True, exist_ok=True)
     if "maze" in env_name_full:
-        data = parse_antmaze_demos(env_name_full)
+        data = parse_antmaze_demos(env_name_full, args.maze_drop_prop, args.maze_keep_k_trajs)
+        if args.maze_keep_k_trajs > 0:
+            data_save_path = Path(expert_root_dir, f"{env_name_full}_{args.maze_keep_k_trajs}_demos")
+        else:
+            data_save_path = Path(expert_root_dir, f"{env_name_full}_{args.maze_drop_prop}_demos")
     else:
-        data = rollout(env_name_full, expert_root_dir=expert_root_dir)
-    data_save_path = Path(expert_root_dir, f"{env_name_full}_demos")
+        data = rollout(env_name_full, expert_root_dir=expert_root_dir, tremble=args.tremble)
+        data_save_path = Path(expert_root_dir, f"{env_name_full}_{args.tremble}_demos")
     np.savez(data_save_path, **data)
     print(f"Saved demonstrations to {data_save_path}.npz")

@@ -30,10 +30,12 @@ def main(env_name: str, graph_all: bool, aggregation_metric: str) -> None:
         "mm": "grey",
         "bc": "#1a1919",
         "bc_reg": "#966919",
-        "filter": "#724BA1",
+        "filter": "#4bacc6",
         "hype": "#F79646",
-        "hyper": "#4BACC6",
-        "hype_filter": "#fc9df9",
+        "hyper": "purple",
+        "hype_filter": "#4bacc6",
+        "guitar": "F79646",
+        "hype_guitar": "F79646"
     }
     env_abbrv_to_full_and_ptremble = {
         "ant": ("Ant-v3", 0.01),
@@ -69,7 +71,11 @@ def main(env_name: str, graph_all: bool, aggregation_metric: str) -> None:
         full_env_name, p_tremble = env_abbrv_to_full_and_ptremble[env_name]
         seeds_per_env = defaultdict(int)
 
-        results_files = [f for f in experiment_results.glob(f"{full_env_name}/*.npz")]
+        full_results_files = [f for f in experiment_results.glob(f"{full_env_name}/*.npz")]
+        results_files = []
+        for file in full_results_files: # TODO: quick fix 
+            if "expert" not in file.name:
+                results_files.append(file)
         if env_name == "ant":
             results_files += [
                 f for f in experiment_results.glob("ant_truncated_obs/*.npz")

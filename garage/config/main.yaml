@@ -6,7 +6,8 @@ device: "cuda:0"
 seed: 1
 debug_mode: false
 
-wandb_log: false
+wandb_log: true
+wandb_project: ${overrides.wandb_project}
 eval_frequency: ${overrides.eval_frequency}
 is_model_based: ${algorithm.is_model_based}
 

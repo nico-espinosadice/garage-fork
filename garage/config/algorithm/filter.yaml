@@ -2,7 +2,9 @@
 name: "filter"
 
 reset_prob: ${overrides.reset_prob}
+reset_type: ${overrides.reset_type} 
 total_env_steps: ${overrides.total_env_steps}
+subopt_dataset_size: 0
 
 relabel: true
 hybrid_sampling: false

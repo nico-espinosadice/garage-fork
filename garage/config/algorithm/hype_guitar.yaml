@@ -1,17 +1,23 @@
 # @package _group_
-name: "bc"
-total_train_steps: 300_000
-total_eval_trajs: 100
-subopt_dataset_size: ${overrides.subopt_dataset_size}
+name: "hype_guitar"
 
-lr: 3e-4
-batch_size: 256
+reset_prob: ${overrides.reset_prob}
+reset_type: ${overrides.reset_type}
+total_env_steps: ${overrides.total_env_steps}
+subopt_dataset_size: ${overrides.subopt_dataset_size} 
+
+relabel: true
+hybrid_sampling: true
+is_model_based: false
+sampling_schedule: ${overrides.sampling_schedule}
+
+bc_init_steps: ${overrides.bc_init_steps}
 
 # --------------------------------------------
 #          SAC Agent configuration
 # --------------------------------------------
 sac_agent:
-  bc_reg: True
+  bc_reg: ${overrides.actor.bc_reg}
   bc_weight: ${overrides.actor.bc_weight}
   policy: ${overrides.actor.policy}
   verbose: 0
@@ -41,5 +47,5 @@ td3_agent:
   policy_freq: ${overrides.actor.policy_freq}
   alpha: ${overrides.actor.alpha}
   decay_lr: ${overrides.actor.decay_lr}
-  hybrid_sampling: false
+  hybrid_sampling: true
   device: ${device}

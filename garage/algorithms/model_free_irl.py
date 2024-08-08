@@ -14,6 +14,7 @@ import numpy as np
 import omegaconf
 import torch
 from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.sac import SAC as SB3_SAC
 from tqdm import tqdm
 
 from garage.models.discriminator import Discriminator, DiscriminatorEnsemble
@@ -22,6 +23,7 @@ from garage.utils.common import MF_LOG_FORMAT, PROJECT_ROOT, rollout_agent_in_re
 from garage.utils.gym_wrappers import (
     GoalWrapper,
     ResetWrapper,
+    BCResetWrapper,
     RewardWrapper,
     TremblingHandWrapper,
 )
@@ -31,7 +33,7 @@ from garage.utils.oadam import OAdam
 from garage.utils.replay_buffer import HybridReplayBuffer, QReplayBuffer
 
 
-def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
+def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any], subopt_demos_dict: Dict[str, Any] = None) -> None:
     """
     Main training loop for model-free inverse reinforcement learning.
 
@@ -56,16 +58,47 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
     # Wrapper to reset to expert states with probability=reset_prob.
     # In standard IRL, reset_prob=0.0. For details, see second point here:
     # https://github.com/jren03/garage/tree/main/garage/algorithms#model-free-inverse-reinforcement-learning
-    env = ResetWrapper(
-        env,
-        demos_dict["qpos"],
-        demos_dict["qvel"],
-        demos_dict["goals"],
-        demos_dict["traj_obs"],
-        demos_dict["traj_actions"],
-        demos_dict["traj_seeds"],
-        reset_prob=cfg.algorithm.reset_prob,
-    )
+    if cfg.algorithm.reset_type == "bc_rollin":
+        bc_model_path = Path(
+            PROJECT_ROOT,
+            "experts",
+            "bc_models",
+            env_name
+        )
+        fname = f"bc_expert{cfg.overrides.expert_dataset_size}_subopt{cfg.algorithm.subopt_dataset_size}_tremble{cfg.overrides.subopt_tremble}_1"
+        fname = fname + "_actor" if is_maze else fname
+        bc_model_path = bc_model_path / fname
+        env = BCResetWrapper(
+            env,
+            bc_model_path=bc_model_path,
+            reset_prob=cfg.algorithm.reset_prob,
+            is_maze=is_maze,
+        )
+    elif cfg.algorithm.reset_type == "subopt_reset":
+        assert subopt_demos_dict is not None
+        env = ResetWrapper(
+            env,
+            subopt_demos_dict["qpos"],
+            subopt_demos_dict["qvel"],
+            subopt_demos_dict["goals"],
+            subopt_demos_dict["traj_obs"],
+            subopt_demos_dict["traj_actions"],
+            subopt_demos_dict["traj_seeds"],
+            reset_prob=cfg.algorithm.reset_prob,
+        )
+    elif cfg.algorithm.reset_type == "expert_reset":
+        env = ResetWrapper(
+            env,
+            demos_dict["qpos"],
+            demos_dict["qvel"],
+            demos_dict["goals"],
+            demos_dict["traj_obs"],
+            demos_dict["traj_actions"],
+            demos_dict["traj_seeds"],
+            reset_prob=cfg.algorithm.reset_prob,
+        )
+    else:
+        raise NotImplementedError(f"Reset type {cfg.algorithm.reset_type} not implemented.")
 
     discriminator_cfg = cfg.overrides.discriminator
     if discriminator_cfg.ensemble_size > 1:
@@ -97,6 +130,9 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
             discriminator=f_net,
             cfg=cfg,
         )
+        if cfg.algorithm.reset_type == "bc_rollin":
+            env.set_bc_model(agent)
+            # env.create_td3(bc_model_path, cfg, env, expert_buffer, learner_buffer, f_net)
         agent.learn(total_timesteps=cfg.algorithm.bc_init_steps, bc=True)
     else:
         sac_agent_cfg = cfg.algorithm.sac_agent
@@ -150,6 +186,31 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
         f"{cfg.algorithm.name}_{cfg.seed}.npz",
     )
     save_path.parent.mkdir(exist_ok=True, parents=True)
+
+    # dataset metric logging
+    if cfg.algorithm.reset_type == "bc_rollin":
+        if is_maze:
+            bc_model = env.get_bc_model() 
+        else:
+            bc_model = SB3_SAC.load(bc_model_path)
+        bc_mean_reward, bc_std_reward = evaluate_policy(
+            bc_model, eval_env, n_eval_episodes=25
+        )
+        if is_maze:
+            bc_mean_reward = bc_mean_reward * 100
+            bc_std_reward = bc_std_reward * 100
+    logger.log_data(
+        log_name,
+        {
+            "bc_mean_reward": bc_mean_reward if cfg.algorithm.reset_type == "bc_rollin" else 0,
+            "bc_std_reward": bc_std_reward if cfg.algorithm.reset_type == "bc_rollin" else 0,
+            "expert_mean_reward": demos_dict["dataset_mean"],
+            "expert_std_reward": demos_dict["dataset_std"],
+            "subopt_mean_reward": subopt_demos_dict["dataset_mean"] if subopt_demos_dict is not None else 0,
+            "subopt_std_reward": subopt_demos_dict["dataset_std"] if subopt_demos_dict is not None else 0,
+        },
+        wandb_only=True,
+    )
 
     # ----------------- Train -----------------
     disc_steps = 0
@@ -223,3 +284,4 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
 
     # ------------- Save results -------------
     print(f"Results saved to {save_path}")
+    logger.end()

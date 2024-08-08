@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any, Dict
 
+import os
 import gym
 import hydra
 import numpy as np
@@ -8,16 +9,18 @@ import omegaconf
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from stable_baselines3.common.evaluation import evaluate_policy
+# from stable_baselines3.common.evaluation import evaluate_policy
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from garage.models.sac import SAC
-from garage.utils.common import PROJECT_ROOT
+from garage.utils.evaluation import evaluate_policy
+from garage.utils.common import MF_LOG_FORMAT, PROJECT_ROOT 
 from garage.utils.gym_wrappers import (
     GoalWrapper,
     TremblingHandWrapper,
 )
+from garage.utils.logger import Logger
 from garage.utils.nn_utils import linear_schedule
 from garage.utils.replay_buffer import QReplayBuffer
 
@@ -34,7 +37,7 @@ class BCDataset(Dataset):
         return self.obs[idx], self.acts[idx]
 
 
-def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
+def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any], subopt_demos_dict: Dict[str, Any] = None) -> None:
     """
     Main training loop for behavioral cloning
 
@@ -63,6 +66,9 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
         state_dim = env.observation_space.shape[0]
         action_dim = env.action_space.shape[0]
         expert_buffer = QReplayBuffer(state_dim, action_dim)
+        if subopt_demos_dict is not None:
+            for key in demos_dict["dataset"].keys():
+                demos_dict["dataset"][key] = np.concatenate((demos_dict["dataset"][key], subopt_demos_dict["dataset"][key]), axis=0)
         expert_buffer.add_d4rl_dataset(demos_dict["dataset"])
         learner_buffer = QReplayBuffer(state_dim, action_dim)
         agent = hydra.utils.instantiate(
@@ -97,6 +103,15 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
         expert_acts = torch.from_numpy(
             demos_dict["dataset"]["actions"][: cfg.overrides.expert_dataset_size]
         ).to(device)
+        if subopt_demos_dict is not None:
+            subopt_obs = torch.from_numpy(
+                subopt_demos_dict["dataset"]["observations"][: cfg.overrides.subopt_dataset_size]
+            ).to(device)
+            expert_obs = torch.cat((expert_obs, subopt_obs), dim=0) 
+            subopt_acts = torch.from_numpy(
+                subopt_demos_dict["dataset"]["actions"][: cfg.overrides.subopt_dataset_size]
+            ).to(device)
+            expert_acts = torch.cat((expert_acts, subopt_acts), dim=0)
         loss_fn = nn.MSELoss()
         optimizer = optim.Adam(pi.parameters(), lr=cfg.algorithm.lr)
         bc_dataset = BCDataset(expert_obs, expert_acts)
@@ -105,14 +120,30 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
         )
 
     # --------------- Logging ---------------
-    save_path = Path(
+    work_dir = os.getcwd()
+    logger = Logger(work_dir, cfg)
+    log_name = f"{cfg.algorithm.name}_{env_name}"
+    logger.register_group(
+        log_name,
+        MF_LOG_FORMAT,
+        color="green",
+    )
+    model_save_path = Path(
+        PROJECT_ROOT,
+        "experts",
+        "bc_models",
+        env_name,
+        f"{cfg.algorithm.name}_expert{cfg.overrides.expert_dataset_size}_subopt{cfg.algorithm.subopt_dataset_size}_tremble{cfg.overrides.subopt_tremble}_{cfg.seed}.npz",
+    )
+    model_save_path.parent.mkdir(exist_ok=True, parents=True)
+    results_save_path = Path(
         PROJECT_ROOT,
         "garage",
         "experiment_results",
         env_name,
         f"{cfg.algorithm.name}_{cfg.seed}.npz",
     )
-    save_path.parent.mkdir(exist_ok=True, parents=True)
+    results_save_path.parent.mkdir(exist_ok=True, parents=True)
 
     # ----------------- Train -----------------
     total_train_steps = cfg.algorithm.total_train_steps
@@ -134,22 +165,32 @@ def train(cfg: omegaconf.DictConfig, demos_dict: Dict[str, Any]) -> None:
         tbar.close()
 
     if is_maze:
-        mean_reward, std_reward = evaluate_policy(
-            agent, eval_env, n_eval_episodes=cfg.algorithm.total_eval_trajs
+        mean_reward, std_reward, _, _, mean_lengths, std_lengths = evaluate_policy(
+            agent, eval_env, n_eval_episodes=cfg.algorithm.total_eval_trajs, return_lengths=True,
         )
         mean_reward = mean_reward * 100
         std_reward = std_reward * 100
     else:
-        mean_reward, std_reward = evaluate_policy(
-            agent, eval_env, n_eval_episodes=cfg.algorithm.total_eval_trajs
+        mean_reward, std_reward, _, _, mean_lengths, std_lengths = evaluate_policy(
+            agent, eval_env, n_eval_episodes=cfg.algorithm.total_eval_trajs, return_lengths=True,
         )
+    logger.log_data(
+        log_name,
+        {
+            "mean_reward": mean_reward,
+            "std_reward": std_reward,
+            "mean_lengths": mean_lengths,
+            "std_lengths": std_lengths,
+        }
+    )
     print(f"{mean_reward=}, {std_reward=}")
     np.savez(
-        str(save_path),
+        str(results_save_path),
         means=mean_reward,
         stds=std_reward,
         p_tremble=cfg.overrides.p_tremble,
     )
+    agent.save(str(model_save_path).replace(".npz", ""))
 
     # ------------- Save results -------------
-    print(f"Results saved to {save_path}")
+    print(f"Results saved to {results_save_path}")

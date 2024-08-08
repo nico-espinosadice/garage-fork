@@ -1,11 +1,15 @@
 # @package _group_
 env: "Humanoid-v3"
+wandb_project: "garage-humanoid"
 
-p_tremble: 0.025
+p_tremble: 0.0
 reset_prob: 0.5
-total_env_steps: 1_000_000
+reset_type: "bc_rollin" # options: "expert_reset", "subopt_reset", "bc_rollin"
+total_env_steps: 500_000
 eval_frequency: 50_000
-expert_dataset_size: 64_000
+expert_dataset_size: 100 
+subopt_dataset_size: 25_000
+subopt_tremble: 0.25
 bc_init_steps: 0
 sampling_schedule: [[0.2, 0.1, 200000], [0.1, 0.01, 1000000]]
 

@@ -1,11 +1,15 @@
 import os
 import sys
 from typing import List, Tuple, Optional
+import copy
 
 import gym
 import numpy as np
 import torch
 from termcolor import cprint
+from pathlib import Path
+from stable_baselines3 import SAC
+from models.td3_bc import TD3_BC
 
 
 class RewardWrapper(gym.Wrapper):
@@ -183,6 +187,93 @@ class ResetWrapper(gym.Wrapper):
             done = True
         return obs, reward, done, info
 
+class BCResetWrapper(gym.Wrapper):
+    """
+    Reset the environment by "rolling in" with the BC policy with probability `reset_prob`.
+    """
+
+    def __init__(
+        self,
+        env: gym.Env,
+        bc_model_path: Path,
+        reset_prob: float = 0.0,
+        is_maze: bool = False,
+    ) -> None:
+        super().__init__(env)
+        self.env = env
+        self.reset_prob = reset_prob
+        if not is_maze:
+            self.bc_model = SAC.load(bc_model_path)
+        self.bc_model_path = bc_model_path
+        self.t = 0
+        self.rng = np.random.default_rng()
+
+        env_name = (
+            env.unwrapped.spec.id
+            if hasattr(env.unwrapped.spec, "id")
+            else env.env_name()
+        )
+        if float(reset_prob) != 0.0:
+            cprint(
+                f"Adding BCResetWrapper to {env_name} with reset probability {reset_prob}",
+                attrs=["bold"],
+            )
+
+        self.T = 1000
+        self.is_maze = "maze" in env_name
+    
+    def set_bc_model(self, agent):
+        self.bc_model = copy.deepcopy(agent)
+        checkpoint = torch.load(self.bc_model_path)
+        self.bc_model.actor.load_state_dict(checkpoint)
+    
+    def create_td3(self, bc_model_path, cfg, env, expert_buffer, learner_buffer, f_net):
+        agent = TD3_BC(
+            env=env,
+            expert_buffer=expert_buffer,
+            learner_buffer=learner_buffer,
+            discriminator=f_net,
+            cfg=cfg,
+            discount=cfg.algorithm.td3_agent.discount,
+            tau=cfg.algorithm.td3_agent.tau,
+            policy_noise_scalar=cfg.algorithm.td3_agent.policy_noise_scalar,
+            noise_clip_scalar=cfg.algorithm.td3_agent.noise_clip_scalar,
+            policy_freq=cfg.algorithm.td3_agent.policy_freq,
+            alpha=cfg.algorithm.td3_agent.alpha,
+            decay_lr=cfg.algorithm.td3_agent.decay_lr,
+            hybrid_sampling=cfg.algorithm.td3_agent.hybrid_sampling,
+            device=cfg.algorithm.td3_agent.device,
+        )
+        self.bc_model = agent
+        checkpoint = torch.load(bc_model_path)
+        self.bc_model.actor.load_state_dict(checkpoint)
+    
+    def get_bc_model(self):
+        return self.bc_model
+    
+    def set_reset_prob(self, new_reset_prob):
+        self.reset_prob = new_reset_prob
+
+    def reset(self) -> np.ndarray:
+        obs = self.env.reset()
+        self.t = 0
+        if self.rng.random() < self.reset_prob:
+            t = np.random.choice(self.T)
+            for i in range(t): 
+                action, _ = self.bc_model.predict(obs)
+                obs, _, done, _  = self.env.step(action)
+                self.t += 1
+                if done: 
+                    obs = self.env.reset()
+                    self.t = 0
+        return obs
+
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, dict]:
+        obs, reward, done, info = self.env.step(action)
+        self.t += 1
+        if self.t >= self.T:
+            done = True
+        return obs, reward, done, info
 
 class HiddenPrints:
     """

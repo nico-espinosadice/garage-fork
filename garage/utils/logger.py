@@ -12,6 +12,7 @@ from typing import Counter, Dict, List, Mapping, Tuple, Union
 import termcolor
 import torch
 import wandb
+from wandb.integration.sb3 import WandbCallback
 from omegaconf import OmegaConf
 
 LogFormatType = List[Tuple[str, str, str]]
@@ -116,12 +117,22 @@ class Logger(object):
         self._group_steps: Counter[str] = collections.Counter()
         self.wandb_log = cfg.wandb_log
         if cfg.wandb_log:
-            wandb.init(
-                project="garage",
+            if hasattr(self, 'run'):
+                self.run.finish()
+            name = f"{cfg.algorithm.name}|{cfg.overrides.env}|{cfg.seed}"
+            self.run = wandb.init(
+                entity="irl_cpi",
+                project=cfg.wandb_project,
                 group=f"{cfg.algorithm.name}_{cfg.overrides.env}",
-                name=f"seed_{cfg.seed}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}",
+                name=name,
                 id=f"{str(uuid.uuid4())[-5:]}",
                 config=OmegaConf.to_container(cfg),
+                sync_tensorboard=True,  # auto-upload sb3's tensorboard metrics
+                monitor_gym=True,  # auto-upload the videos of agents playing the game
+                save_code=True,  # optional
+            )
+            self.wandb_callback = WandbCallback(
+                verbose=2,
             )
 
     def register_group(
@@ -160,7 +171,7 @@ class Logger(object):
     def log_param(self, *_args):
         pass
 
-    def log_data(self, group_name: str, data: Mapping[str, LogTypes]):
+    def log_data(self, group_name: str, data: Mapping[str, LogTypes], wandb_only=False):
         """Logs the data contained in a given dictionary to the given logging group.
 
         Args:
@@ -169,21 +180,34 @@ class Logger(object):
             data (mapping str->(int/float/torch.Tensor)): the dictionary with the data. Each
                 keyword must be a variable name in the log format passed when creating this group.
         """
-        if group_name not in self._groups:
-            raise ValueError(f"Group {group_name} has not been registered.")
-        meter_group, dump_frequency, color = self._groups[group_name]
+        if not wandb_only:
+            if group_name not in self._groups:
+                raise ValueError(f"Group {group_name} has not been registered.")
+            meter_group, dump_frequency, color = self._groups[group_name]
+            for key, value in data.items():
+                if isinstance(value, torch.Tensor):
+                    value = value.item()  # type: ignore
+                meter_group.log(key, value)
+        
+        wandb_metrics = {}
         for key, value in data.items():
             if isinstance(value, torch.Tensor):
                 value = value.item()  # type: ignore
-            meter_group.log(key, value)
-            if self.wandb_log:
-                wandb.log({key: value})
-        self._group_steps[group_name] += 1
-        if self._group_steps[group_name] % dump_frequency == 0:
-            self._dump(group_name)
+            wandb_metrics[key] = value
+        if self.wandb_log:
+            self.run.log(wandb_metrics)
+
+        if not wandb_only:
+            self._group_steps[group_name] += 1
+            if self._group_steps[group_name] % dump_frequency == 0:
+                self._dump(group_name)
 
     def _dump(self, group_name: str, save: bool = True):
         if group_name not in self._groups:
             raise ValueError(f"Group {group_name} has not been registered.")
         meter_group, dump_frequency, color = self._groups[group_name]
         meter_group.dump(self._group_steps[group_name], group_name, save, color=color)
+
+    def end(self):
+        if self.wandb_log:
+            self.run.finish()
